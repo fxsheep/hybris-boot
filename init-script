@@ -90,6 +90,8 @@ export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
 USB_FUNCTIONS=rndis
 
 ANDROID_USB=/sys/class/android_usb/android0
+CONFIGFS_USB=/sys/kernel/config/usb_gadget/g1
+
 LOCAL_IP=192.168.2.15
 
 DONE_SWITCH=no
@@ -188,6 +190,15 @@ inject_loop() {
 
 # This sets up the USB with whatever USB_FUNCTIONS are set to
 usb_setup() {
+    if [ -e "$ANDROID_USB" ];
+    then
+        android_usb_setup $1
+    else
+        configfs_usb_setup $1
+    fi
+}
+
+android_usb_setup() {
       write $ANDROID_USB/enable        0
       write $ANDROID_USB/functions     ""
       write $ANDROID_USB/enable        1
@@ -201,12 +212,39 @@ usb_setup() {
       write $ANDROID_USB/functions     $USB_FUNCTIONS
       write $ANDROID_USB/enable        1
 }
+
+configfs_usb_setup() {
+      write $CONFIGFS_USB/UDC                  ""
+      mkdir $CONFIGFS_USB/configs/c.1
+      rm $CONFIGFS_USB/configs/c.1/*.usb
+      write $CONFIGFS_USB/UDC                  "$(ls /sys/class/udc/)"
+      usleep 500000 # 0.5 delay to attempt to remove rndis function
+      write $CONFIGFS_USB/UDC                  ""
+      write $CONFIGFS_USB/idVendor             18D1
+      write $CONFIGFS_USB/idProduct            D001
+      mkdir $CONFIGFS_USB/strings/0x409
+      write $CONFIGFS_USB/strings/0x409/manufacturer   "Mer Boat Loader"
+      write $CONFIGFS_USB/strings/0x409/product         "$CUSTOMPRODUCT"
+      write $CONFIGFS_USB/strings/0x409/serialnumber   "$1"
+      IFS=','
+      for i in $USB_FUNCTIONS; do
+          mkdir $CONFIGFS_USB/functions/$i.usb0
+          ln -s $CONFIGFS_USB/functions/$i.usb0 $CONFIGFS_USB/configs/c.1
+      done
+      write $CONFIGFS_USB/UDC                  "$(ls /sys/class/udc/)"
+}
+
 # This lets us communicate errors to host (if it needs disable/enable then that's a problem)
 usb_info() {
     # make sure USB is settled
     echo "########################## usb_info: $1"
     sleep 1
-    write $ANDROID_USB/iSerial       "$1"
+    if [ -e "$ANDROID_USB" ];
+    then
+        write $ANDROID_USB/iSerial             "$1"
+    else
+        write $CONFIGFS_USB/strings/0x409/serialnumber "$1"
+    fi
 }
 
 
@@ -305,6 +343,11 @@ if [ "$DONE_SWITCH" = "no" ]; then
 
     check_kernel_config
 
+    if [ ! -e "$ANDROID_USB" ]; then
+        mount -t configfs none /sys/kernel/config
+        mkdir "$CONFIGFS_USB"
+    fi
+
     bootsplash
 
     mount_stowaways
@@ -319,11 +362,22 @@ if [ "$DONE_SWITCH" = "no" ]; then
     [ -f /target/init_disable_telnet ] && DISABLE_TELNET="y"
 
     if ! [ "$DBG_REASON" = "" ] ; then
-	# During debug we export mmc too (some variations in location here)
-	lun=/sys/class/android_usb/f_mass_storage/lun/file
-	if [ -f $lun ]; then echo /dev/mmcblk0 > $lun; fi
-	lun=/sys/class/android_usb/f_mass_storage/lun0/file
-	if [ -f $lun ]; then echo /dev/mmcblk0 > $lun; fi
+	if [ -e "$ANDROID_USB" ];
+	then
+	    # During debug we export mmc too (some variations in location here)
+	    lun=/sys/class/android_usb/f_mass_storage/lun/file
+	    if [ -f $lun ]; then echo /dev/mmcblk0 > $lun; fi
+	    lun=/sys/class/android_usb/f_mass_storage/lun0/file
+	    if [ -f $lun ]; then echo /dev/mmcblk0 > $lun; fi
+	else
+	    # During debug we export mmc too (some variations in location here)
+	    mkdir $CONFIGFS_USB/functions/mass_storage.usb0
+	    lun=$CONFIGFS_USB/functions/mass_storage.usb0/lun.0/file
+	    if [ -f $lun ]; then echo /dev/mmcblk0 > $lun; fi
+	    mkdir $CONFIGFS_USB/functions/mass_storage.usb0/lun.1
+	    lun=$CONFIGFS_USB/functions/mass_storage.usb0/lun.1/file
+	    if [ -f $lun ]; then echo /dev/mmcblk0 > $lun; fi
+	fi
 	USB_FUNCTIONS=rndis,mass_storage
 
 	run_debug_session $DBG_REASON
